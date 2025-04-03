@@ -1,5 +1,5 @@
 ---
-date: "2025-04-03T18:48:00+05:30"
+date: "2025-04-04T00:00:00+05:30"
 draft: false
 title: "Setting Up K3s with Postgres: A Guide to High Availability"
 tags: ["edge", "k3s", "rancher", "postgres", "MetalLB", "Cilium", "CNI"]
