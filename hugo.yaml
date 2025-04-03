@@ -1,6 +1,6 @@
-baseURL: https://blog.avidhara.cloud/
+baseURL: https://avidhara.github.io/blog/
 languageCode: en-us
-title: My New Hugo Site
+title: Blog
 theme: ["PaperMod"]
 caches:
   images:
