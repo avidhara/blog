@@ -2,6 +2,7 @@ baseURL: https://blog.avidhara.cloud
 languageCode: en-us
 title: Avidhara:- Blog
 theme: ["PaperMod"]
+googleAnalytics: "G-K49SMX24H3"
 caches:
   images:
     dir: :cacheDir/images
