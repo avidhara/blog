@@ -4,7 +4,6 @@ draft: false
 title: 'Running K3s ARM based Architecture'
 tags: ["edge","k3s","rancher"]
 ---
-# Running K3s ARM based Architecture
 
 ## Introduction 
 
