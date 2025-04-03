@@ -2,7 +2,7 @@
 date: "2025-04-03T17:13:01+05:30"
 draft: false
 title: "Running K3s ARM based Architecture"
-tags: ["edge", "k3s", "rancher"]
+tags: ["edge", "k3s", "rancher","lab","VirtualBox","vagrant"]
 author: Edge Computing team
 ---
 
@@ -165,4 +165,8 @@ journalctl -u k3s -f
 **Additional Links**
 
 Lab-related code and configurations can be found in the [GitHub Repository](https://github.com/avidhara).
-```
+
+**Lab2**
+
+[Use Postgres as External Datastore for K3S](https://blog.avidhara.cloud/posts/edge/use-postgres-k3s/)
+
