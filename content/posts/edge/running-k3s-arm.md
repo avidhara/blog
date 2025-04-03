@@ -10,7 +10,7 @@ tags: ["edge", "k3s", "rancher"]
 K3S is an light weight certified Kubernetes distribution, specifically built for `IoT` & `Edge`
 ### Architecture
 
-<img src="/assets/images/how-it-works-k3s.svg" alt="Description" width="600">
+![alt](./how-it-works-k3s.svg)
 
 ### Using K3S
 
