@@ -1,6 +1,6 @@
 baseURL: https://avidhara.github.io/blog/
 languageCode: en-us
-title: Blog
+title: Avidhara:- Blog
 theme: ["PaperMod"]
 caches:
   images:
