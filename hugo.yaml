@@ -64,3 +64,8 @@ params:
     - name: github
       title: View Source on Github
       url: "https://github.com/avidhara"
+outputs:
+  home:
+    - HTML
+    - RSS
+    - JSON 
