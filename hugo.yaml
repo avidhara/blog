@@ -3,6 +3,58 @@ languageCode: en-us
 title: Avidhara:- Blog
 theme: ["PaperMod"]
 googleAnalytics: "G-K49SMX24H3"
+
+copyright: "© [Avidhara Technologies Pvt LTD](https://avidhara.cloud) 2025"
+
+pagination:
+  pagerSize: 5
+
+enableInlineShortcodes: true
+enableRobotsTXT: true
+buildDrafts: false
+buildFuture: false
+buildExpired: false
+enableEmoji: true
+pygmentsUseClasses: true
+mainsections: ["posts", "papermod"]
+
+languages:
+  en:
+    languageName: "English"
+    weight: 1
+    taxonomies:
+      category: categories
+      tag: tags
+      series: series
+    menu:
+      main:
+        - name: Archive
+          url: archives
+          weight: 5
+        - name: Search
+          url: search/
+          weight: 10
+        - name: Tags
+          url: tags/
+          weight: 10
+
 caches:
   images:
     dir: :cacheDir/images
+
+params:
+  ShowShareButtons: true
+  ShowReadingTime: true
+  displayFullLangName: true
+  ShowPostNavLinks: true
+  ShowBreadCrumbs: true
+  ShowCodeCopyButtons: true
+  ShowRssButtonInSectionTermList: true
+  ShowAllPagesInArchive: true
+  ShowPageNums: true
+  ShowToc: true
+
+  socialIcons:
+    - name: github
+      title: View Source on Github
+      url: "https://github.com/avidhara"
