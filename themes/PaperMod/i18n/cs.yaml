@@ -1,33 +1,34 @@
-- id: prev_page
-  translation: "Předchozí"
+---
+    - id: prev_page
+      translation: Předchozí
 
-- id: next_page
-  translation: "Další"
+    - id: next_page
+      translation: Další
 
-- id: read_time
-  translation:
-    one : "1 min"
-    other: "{{ .Count }} min"
+    - id: read_time
+      translation:
+          one: 1 min
+          other: '{{ .Count }} min'
 
-- id: words
-  translation:
-    one : "slovo"
-    other: "{{ .Count }} slov"
+    - id: words
+      translation:
+          one: slovo
+          other: '{{ .Count }} slov'
 
-- id: toc
-  translation: "Obsah"
+    - id: toc
+      translation: Obsah
 
-- id: translations
-  translation: "Překlady"
+    - id: translations
+      translation: Překlady
 
-- id: home
-  translation: "Domů"
+    - id: home
+      translation: Domů
 
-- id: edit_post
-  translation: "Upravit"
+    - id: edit_post
+      translation: Upravit
 
-- id: code_copy
-  translation: "kopírovat"
+    - id: code_copy
+      translation: kopírovat
 
-- id: code_copied
-  translation: "zkopírováno!"
+    - id: code_copied
+      translation: zkopírováno!

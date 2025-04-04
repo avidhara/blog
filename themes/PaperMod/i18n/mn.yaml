@@ -1,25 +1,26 @@
-- id: prev_page
-  translation: "Ѳмнѳх"
+---
+    - id: prev_page
+      translation: Ѳмнѳх
 
-- id: next_page
-  translation: "Дараах"
+    - id: next_page
+      translation: Дараах
 
-- id: read_time
-  translation:
-    one : "1 МИН"
-    other: "{{ .Count }} МИН"
+    - id: read_time
+      translation:
+          one: 1 МИН
+          other: '{{ .Count }} МИН'
 
-- id: toc
-  translation: "Агуулга"
+    - id: toc
+      translation: Агуулга
 
-- id: translations
-  translation: "Орчуулга"
+    - id: translations
+      translation: Орчуулга
 
-- id: home
-  translation: "Нүүр"
+    - id: home
+      translation: Нүүр
 
-- id: code_copy
-  translation: "хуулах"
+    - id: code_copy
+      translation: хуулах
 
-- id: code_copied
-  translation: "хуулсан!"
+    - id: code_copied
+      translation: хуулсан!

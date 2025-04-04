@@ -1,33 +1,34 @@
-- id: prev_page
-  translation: "Trang trước"
+---
+    - id: prev_page
+      translation: Trang trước
 
-- id: next_page
-  translation: "Trang tiếp theo"
+    - id: next_page
+      translation: Trang tiếp theo
 
-- id: read_time
-  translation:
-    one: "1 phút"
-    other: "{{ .Count }} phút"
+    - id: read_time
+      translation:
+          one: 1 phút
+          other: '{{ .Count }} phút'
 
-- id: words
-  translation:
-    one: "từ"
-    other: "{{ .Count }} từ"
+    - id: words
+      translation:
+          one: từ
+          other: '{{ .Count }} từ'
 
-- id: toc
-  translation: "Mục lục"
+    - id: toc
+      translation: Mục lục
 
-- id: translations
-  translation: "Bản dịch"
+    - id: translations
+      translation: Bản dịch
 
-- id: home
-  translation: "Trang chủ"
+    - id: home
+      translation: Trang chủ
 
-- id: edit_post
-  translation: "Chỉnh sửa"
+    - id: edit_post
+      translation: Chỉnh sửa
 
-- id: code_copy
-  translation: "Sao chép"
+    - id: code_copy
+      translation: Sao chép
 
-- id: code_copied
-  translation: "Đã sao chép!"
+    - id: code_copied
+      translation: Đã sao chép!
