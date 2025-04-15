@@ -1,34 +1,33 @@
----
-    - id: prev_page
-      translation: Anterior
+- id: prev_page
+  translation: "Anterior"
 
-    - id: next_page
-      translation: Siguiente
+- id: next_page
+  translation: "Siguiente"
 
-    - id: read_time
-      translation:
-          one: 1 min
-          other: '{{ .Count }} min'
+- id: read_time
+  translation:
+    one : "1 min"
+    other: "{{ .Count }} min"
 
-    - id: words
-      translation:
-          one: palabra
-          other: '{{ .Count }} palabras'
+- id: words
+  translation:
+    one : "palabra"
+    other: "{{ .Count }} palabras"
 
-    - id: toc
-      translation: Tabla de Contenidos
+- id: toc
+  translation: "Tabla de Contenidos"
 
-    - id: translations
-      translation: Traducciones
+- id: translations
+  translation: "Traducciones"
 
-    - id: home
-      translation: Inicio
+- id: home
+  translation: "Inicio"
 
-    - id: edit_post
-      translation: Editar
+- id: edit_post
+  translation: "Editar"
 
-    - id: code_copy
-      translation: copiar
+- id: code_copy
+  translation: "copiar"
 
-    - id: code_copied
-      translation: ¡copiado!
+- id: code_copied
+  translation: "¡copiado!"
