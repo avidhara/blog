@@ -1,7 +1,7 @@
 ---
 date: "2025-04-15T13:04:01+05:30"
 draft: false
-title: "External Secret Operator: Use Kubernetes as Secret provider"
+title: "Synchronizing Secrets Across Kubernetes Clusters with External Secrets Operator"
 tags: ["k8s", "kubernetes", "secrets", "External Secret Operator", "ESO"]
 author: K8S team
 ---
