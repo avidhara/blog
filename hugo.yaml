@@ -12,7 +12,7 @@ pagination:
 
 enableInlineShortcodes: true
 enableRobotsTXT: true
-buildDrafts: true
+buildDrafts: false
 buildFuture: false
 buildExpired: false
 enableEmoji: true

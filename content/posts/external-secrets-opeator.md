@@ -2,7 +2,7 @@
 date: "2025-04-15T13:04:01+05:30"
 draft: false
 title: "Synchronizing Secrets Across Kubernetes Clusters with External Secrets Operator"
-tags: ["k8s", "kubernetes", "secrets", "External Secret Operator", "ESO"]
+tags: ["k8s", "kubernetes", "secrets", "External Secret Operator", "ESO","vault","K8sSecurity","CloudNative"]
 author: K8S team
 ---
 
@@ -145,6 +145,7 @@ kubectl get secrets eso-reader-token -o jsonpath='{.data.token}' | base64 -d > e
 # Extract the CA cert
 kubectl get secrets eso-reader-token -o jsonpath='{.data.ca\.crt}' | base64 -d > eso/ca.crt
 # Get the API server address
+kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
 ```
 
 ### Configure the ESO in Cluster 2
