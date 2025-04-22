@@ -1,25 +1,10 @@
 ---
-
 date: "2025-04-21T18:49:04+05:30"
-draft: true
+draft: false
 title: "Mastering Fleet: GitOps for Multi-Cluster Kubernetes Management"
-tags:
-[
-"edge",
-"k3s",
-"rancher",
-"fleet",
-"rke2",
-"ci-cd",
-"gitops",
-"kubernetes",
-"k8s",
-"continuous delivery",
-"multi-cluster",
-"gitops-based",
-"declarative configuration",
-]
+tags: [ "edge", "k3s", "rancher", "fleet", "rke2", "ci-cd", "gitops", "kubernetes", "k8s", "continuous delivery", "multi-cluster", "gitops-based", "declarative configuration"]
 author: K8S team
+---
 
 ## Introduction
 
