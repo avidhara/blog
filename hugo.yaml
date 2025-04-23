@@ -60,7 +60,7 @@ params:
     TocOpen: true
     comments: true
     editPost:
-        URL: https://github.com/avidhara/blog/tree/main/content/posts
+        URL: https://github.com/avidhara/blog/tree/main/content/
         Text: Suggest Changes   # edit text
         appendFilePath: true
 
