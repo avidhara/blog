@@ -117,6 +117,8 @@ spec:
     dashboards:
       enabled: true
     enableIPv4Masquerade: true 
+    operator:
+      replicas: 1
     hubble:
       enabled: true 
       relay:
