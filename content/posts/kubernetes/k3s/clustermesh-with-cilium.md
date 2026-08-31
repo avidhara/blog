@@ -8,7 +8,7 @@ author: K8S team
 # Why we need ClusterMesh for Kubernetes
 
 Kubernetes multi-cluster architecture requires a way to connect workloads across distinct clusters without forcing all inter-cluster traffic through public internet load balancers or edge gateways. **Cluster Mesh** solves this by unifying the networking layer across multiple independent Kubernetes clusters into a single flat network plane.
-
+![alt](/images/cilium-mesh.webp)
 ---
 
 **Core Reasons to Use Cluster Mesh**
