@@ -102,23 +102,34 @@ spec:
   chart: cilium
   repo: https://helm.cilium.io/
   targetNamespace: kube-system
-  version: 1.19.3
+  version: 1.20.1
   bootstrap: true
   valuesContent: |
     kubeProxyReplacement: true
-    autoDirectNodeRoutes: true
-    ipv4NativeRoutingCIDR: "10.42.0.0/16"
-    routingMode: native
-    k8sServiceHost: "127.0.0.1"
-    k8sServicePort: "6444"
-    operator:
-      replicas: 1
-    # Enable Hubble for edge observability
-    hubble:
-      enabled: true
-    # Use eBPF host routing to bypass iptables completely
+    autoDirectNodeRoutes: true 
     bpf:
+      hostLegacyRouting: false 
       masquerade: true
+    cni:
+      chainingMode: none 
+      exclusive: true 
+      installImage: true
+    dashboards:
+      enabled: true
+    enableIPv4Masquerade: true 
+    hubble:
+      enabled: true 
+      relay:
+        enabled: true
+      ui:
+        enabled: true
+    ipv4NativeRoutingCIDR: 10.42.0.0/16
+    k8sServiceHost: 127.0.0.1
+    k8sServicePort: '6443'
+    kubeProxyReplacement: 'true' 
+    routingMode: native 
+    securityContext:
+      privileged: true
 EOF
 ```
 
