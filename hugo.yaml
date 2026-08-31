@@ -5,7 +5,7 @@ title: Avidhara:- Blog
 theme: [PaperMod]
 googleAnalytics: G-K49SMX24H3
 
-copyright: © [Avidhara Technologies Pvt LTD](https://avidhara.cloud) 2025
+copyright: © [Avidhara Technologies Pvt LTD](https://avidhara.cloud) 2026-2027
 
 pagination:
     pagerSize: 5
@@ -59,6 +59,8 @@ params:
     ShowToc: true
     TocOpen: true
     comments: true
+    profileMode:
+        enabled: false
     editPost:
         URL: https://github.com/avidhara/blog/tree/main/content/
         Text: Suggest Changes   # edit text
@@ -68,6 +70,8 @@ params:
         - name: github
           title: View Source on Github
           url: https://github.com/avidhara
+        - name: LinkedIn
+          url: https://www.linkedin.com/company/avidhara
 outputs:
     home:
         - HTML
