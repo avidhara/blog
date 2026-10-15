@@ -1,7 +1,7 @@
 ---
 date: '2026-08-31T15:17:48+08:00'
 draft: true
-title: 'Setup Clustermesh with Cilium'
+title: 'Setup Cluster-mesh with Cilium'
 tags: [ "kubernetes", "k3s", "cilium", "clustermesh", "multicluster", "edge", "networking" ]
 author: K8S team
 ---
@@ -133,7 +133,7 @@ spec:
       masquerade: true
     cluster:
         id: 1
-        name: k3s-02
+        name: k3s-01
     operator:
       replicas: 1
     cni:
@@ -163,6 +163,8 @@ check cilium status
 
 ```bash
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+# Check Cilium status
 
 cilium status
     /¯¯\
@@ -195,6 +197,179 @@ Image versions         cilium             quay.io/cilium/cilium:v1.20.1@sha256:a
 
 you should be able to see all the componets are up and running and `ClusterMesh:        disabled` state.
 
-repeat this step for cluster-2 as well.
+repeat this step for `cluster-2` as well.
+
+update  cluster ID and and me before deploying to `cluster-2`.
+
+```yaml
+cluster:
+  id: 2
+  name: k3s-02
+ipv4NativeRoutingCIDR: 10.52.0.0/16
+```
+
+Check cilium status on cluster-2 as well.
 
 ### Enable Cluster Mesh on both the clusters
+
+Once cilium us up and running in both cluster-1 and cluster-2 we are ready to configure the cilium cluster-mesh.
+
+#### Configure TLS certificates
+
+Cluster Mesh uses mutual TLS between the Cilium agents of one cluster and the `clustermesh-apiserver` of the other. For the clusters to trust each other, **all clusters must share the same Cilium CA** (stored in the `cilium-ca` secret in `kube-system`).
+
+By default each Helm install generates its own random CA, so we generate one CA up front and pass it to both clusters through Helm values.
+
+we will be using Helm approch for this installation you can use cert-manager, or custom ca certificates as well.
+
+to use cert-manager or custom ca please refere /[here](https://docs.cilium.io/en/stable/network/clustermesh/setup/#configure-tls-certificates)
+
+#### Configure Cluster Mesh
+
+update cilium HelmChart config for k3s-01, update `$CLUSTER1_NODE_IP` and `$CLUSTER2_NODE_IP`
+
+```yaml
+clustermesh:
+  useAPIServer: true
+  config:
+    enabled: true
+    clusters:
+      cluster1:
+        address: $CLUSTER1_NODE_IP
+        port: 32379
+      cluster2:
+        address: $CLUSTER2_NODE_IP
+        port: 32379
+  apiserver:
+    service:
+      type: NodePort
+      nodePort: 32379
+    tls:
+      auto:
+        enabled: true
+        method: cronJob
+```
+
+Once the configs are updated, cilium will deploy `clustermesh-apiserver` and creates CA certificate in secret with name `cilium-ca`.
+
+Copy the CA certificate from k3s-01 to k3s-02.
+
+Both clusters must share the same CA, so k3s-02's own `cilium-ca` (created when Cilium was first installed) has to be replaced with the one from k3s-01. The commands below assume both clusters are reachable as kubeconfig contexts (`$CLUSTER1=k3s-01`, `$CLUSTER2=k3s-02`).
+
+```bash
+export CLUSTER1=k3s-01
+export CLUSTER2=k3s-02
+
+# Replace the existing cilium-ca on k3s-02 with the one from k3s-01
+kubectl --context $CLUSTER1 -n kube-system get secret cilium-ca -o yaml \
+  | grep -vE '^\s+(resourceVersion|uid|creationTimestamp):' \
+  | kubectl --context $CLUSTER2 -n kube-system replace --force -f -
+```
+
+> **Note:** `create` fails because k3s-02 already has a `cilium-ca` secret. `replace --force` deletes it and recreates it. The `grep` removes metadata that only applies to the source cluster.
+
+Check that both clusters now have the same CA:
+
+```bash
+diff <(kubectl --context $CLUSTER1 -n kube-system get secret cilium-ca -o jsonpath='{.data.ca\.crt}') \
+     <(kubectl --context $CLUSTER2 -n kube-system get secret cilium-ca -o jsonpath='{.data.ca\.crt}') \
+  && echo "CA matches"
+```
+
+Now repeat the cilium HelmChart config update on k3s-02. Then restart Cilium so the agents and operator pick up the shared CA:
+
+```bash
+kubectl --context $CLUSTER2 -n kube-system rollout restart ds/cilium deploy/cilium-operator
+```
+
+Now enable the `clustermesh-apiserver` and tell each cluster how to reach its peer. Each k3s cluster here has a single node, so we expose the apiserver via `NodePort` and point the peer at the node IP.
+
+> **Note:** Because both clusters share the same CA, the per-cluster `tls.cert`/`tls.key`/`tls.caCert` fields under `clustermesh.config.clusters[]` can be omitted.
+
+| Value | Purpose |
+| --- | --- |
+| `cluster.id` / `cluster.name` | Set earlier in the HelmChart. Must be unique per cluster (`id` 1–255). Keys under `clustermesh.config.clusters` must match these names. |
+| `clustermesh.useAPIServer: true` | Deploys `clustermesh-apiserver` (etcd + kvstoremesh). It shares this cluster's state with its peers. |
+| `clustermesh.config.enabled: true` | Generates the `cilium-clustermesh` secret the agents use to connect to remote clusters. |
+| `clustermesh.config.clusters.<name>.address` | Address where the peer's `clustermesh-apiserver` can be reached. Here, the node IP of each k3s cluster. |
+| `clustermesh.config.clusters.<name>.port` | Port of the peer's apiserver. It must match the peer's `nodePort` (`32379`). |
+| `clustermesh.apiserver.service.type: NodePort` | Exposes the apiserver on every node. This suits single-node k3s without a LoadBalancer. |
+| `clustermesh.apiserver.service.nodePort: 32379` | Fixed NodePort, so the peer config stays the same on both clusters. |
+| `clustermesh.apiserver.tls.auto.enabled: true` | Generates the server, admin and remote client certificates automatically. |
+| `clustermesh.apiserver.tls.auto.method: cronJob` | A Job/CronJob generates the certificates and renews them periodically, signed by `cilium-ca`. The alternatives are `helm` (generated at install time) and `certmanager`. |
+
+> **Tip:** The same `clusters` list can be used on both clusters. Cilium ignores the entry that matches its own `cluster.name`, so each cluster only connects to its peer.
+
+#### Validate Cluster Mesh
+
+Wait for the Cluster Mesh components to come up by running `cilium clustermesh status --wait` against both clusters:
+
+```bash
+cilium clustermesh status --context $CLUSTER1 --wait
+cilium clustermesh status --context $CLUSTER2 --wait
+```
+
+The output should look similar to this (from k3s-01):
+
+```bash
+✅ Cluster access information is available:
+  - <CLUSTER1_NODE_IP>:32379
+✅ Service "clustermesh-apiserver" of type "NodePort" found
+⌛ Waiting (12s) for clusters to be connected: 1 nodes are not ready
+✅ All 1 nodes are connected to all clusters [min:1 / avg:1.0 / max:1]
+🔌 Cluster Connections:
+  - k3s-02: 1/1 configured, 1/1 connected
+```
+
+`cilium status --context $CLUSTER1` should now show `ClusterMesh: 1/1 remote clusters ready` instead of `disabled`.
+
+#### Test Pod Connectivity Between Clusters
+
+Once both clusters report as connected, validate cross-cluster connectivity by running the connectivity test in multi-cluster mode:
+
+```bash
+cilium connectivity test --context $CLUSTER1 --multi-cluster $CLUSTER2
+```
+
+#### Troubleshooting
+
+If validation does not succeed:
+
+1. Validate that Cilium pods are healthy and ready:
+
+   ```bash
+   cilium status --context $CLUSTER1
+   cilium status --context $CLUSTER2
+   ```
+
+2. Validate that Cluster Mesh is enabled and operational:
+
+   ```bash
+   cilium clustermesh status --context $CLUSTER1
+   cilium clustermesh status --context $CLUSTER2
+   ```
+
+3. Check that both clusters share the same `cilium-ca`, that TCP `32379` is reachable between the node IPs, and that the keys under `clustermesh.config.clusters` match each cluster's `cluster.name`.
+
+For more detail, see the [Cluster Mesh Troubleshooting](https://docs.cilium.io/en/stable/operations/troubleshooting/#troubleshooting-clustermesh) guide.
+
+#### Test with a Global Service
+
+Deploy the same Service in both clusters with the `service.cilium.io/global` annotation:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  annotations:
+    service.cilium.io/global: "true"
+spec:
+  selector:
+    app: echo
+  ports:
+    - port: 80
+      targetPort: 8080
+```
+
+Requests to `echo` from either cluster are now load-balanced across backends in both clusters. Add `service.cilium.io/affinity: "local"` to prefer local backends and only fail over to the remote cluster when local ones are unavailable.
