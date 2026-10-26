@@ -1,14 +1,20 @@
 ---
-date: '2026-08-31T15:17:48+08:00'
-draft: true
-title: 'Setup Cluster-mesh with Cilium'
-tags: [ "kubernetes", "k3s", "cilium", "clustermesh", "multicluster", "edge", "networking" ]
+date: '2026-10-25T15:17:48+08:00'
+draft: false
+title: 'Connecting Multiple K3s Clusters with Cilium ClusterMesh: A Step-by-Step Guide'
+tags: [ "kubernetes", "k3s", "cilium", "clustermesh", "ebpf", "global-services", "multicluster", "edge", "networking" ]
 author: K8S team
+description: "Step-by-step tutorial on configuring Cilium ClusterMesh on K3s. Enable direct cross-cluster pod-to-pod routing, shared CA mutual TLS, and global services."
+categories: ["Kubernetes", "Networking"]
+cover:
+  alt: "Cilium ClusterMesh multi-cluster networking architecture connecting two K3s clusters"
 ---
-# Why we need ClusterMesh for Kubernetes
+## Why we need ClusterMesh for Kubernetes
 
 Kubernetes multi-cluster architecture requires a way to connect workloads across distinct clusters without forcing all inter-cluster traffic through public internet load balancers or edge gateways. **Cluster Mesh** solves this by unifying the networking layer across multiple independent Kubernetes clusters into a single flat network plane.
-![alt](/images/cilium-mesh.webp)
+
+![Cilium ClusterMesh architecture interconnecting two K3s clusters over eBPF](/images/cilium-mesh.webp)
+
 ---
 
 **Core Reasons to Use Cluster Mesh**
@@ -72,9 +78,9 @@ kubectl get nodes
 k3s-02   NotReady   control-plane   7s    v1.36.4+k3s1
 ```
 
-Repeat Above steps for cluster-2 as well, Make sure Cluster CIDR & Service CIDR are different between the clusters.
+Repeat Above steps for cluster-02 as well, Make sure Cluster CIDR & Service CIDR are different between the clusters.
 
-Here is an example for cluster-2,
+Here is an example for cluster-02,
 
 ```bash
 cat << EOF > /etc/rancher/k3s/config.yaml
@@ -197,9 +203,9 @@ Image versions         cilium             quay.io/cilium/cilium:v1.20.1@sha256:a
 
 you should be able to see all the componets are up and running and `ClusterMesh:        disabled` state.
 
-repeat this step for `cluster-2` as well.
+repeat these step for `cluster-02` as well.
 
-update  cluster ID and and me before deploying to `cluster-2`.
+update  cluster `ID` and and me before deploying to `cluster-02`.
 
 ```yaml
 cluster:
@@ -208,11 +214,11 @@ cluster:
 ipv4NativeRoutingCIDR: 10.52.0.0/16
 ```
 
-Check cilium status on cluster-2 as well.
+Check cilium status on cluster-02 as well.
 
 ### Enable Cluster Mesh on both the clusters
 
-Once cilium us up and running in both cluster-1 and cluster-2 we are ready to configure the cilium cluster-mesh.
+Once cilium us up and running in both cluster-01 and cluster-02 we are ready to configure the cilium cluster-mesh.
 
 #### Configure TLS certificates
 
@@ -222,7 +228,7 @@ By default each Helm install generates its own random CA, so we generate one CA 
 
 we will be using Helm approch for this installation you can use cert-manager, or custom ca certificates as well.
 
-to use cert-manager or custom ca please refere /[here](https://docs.cilium.io/en/stable/network/clustermesh/setup/#configure-tls-certificates)
+to use cert-manager or custom ca please refer to the [official Cilium TLS Certificate documentation](https://docs.cilium.io/en/stable/network/clustermesh/setup/#configure-tls-certificates).
 
 #### Configure Cluster Mesh
 
@@ -312,16 +318,52 @@ cilium clustermesh status --context $CLUSTER2 --wait
 The output should look similar to this (from k3s-01):
 
 ```bash
+cilium clustermesh status
+✅ Service "clustermesh-apiserver" of type "LoadBalancer" found
 ✅ Cluster access information is available:
-  - <CLUSTER1_NODE_IP>:32379
-✅ Service "clustermesh-apiserver" of type "NodePort" found
-⌛ Waiting (12s) for clusters to be connected: 1 nodes are not ready
+  - 192.168.40.31:2379
+✅ Deployment clustermesh-apiserver is ready
+ℹ️  KVStoreMesh is enabled
+
 ✅ All 1 nodes are connected to all clusters [min:1 / avg:1.0 / max:1]
+✅ All 1 KVStoreMesh replicas are connected to all clusters [min:1 / avg:1.0 / max:1]
+
 🔌 Cluster Connections:
-  - k3s-02: 1/1 configured, 1/1 connected
+  - cluster2: 1/1 configured, 1/1 connected - KVStoreMesh: 1/1 configured, 1/1 connected
 ```
 
-`cilium status --context $CLUSTER1` should now show `ClusterMesh: 1/1 remote clusters ready` instead of `disabled`.
+Check Cilium status you should be able to see `ClusterMesh`  should be in in `OK` status.
+
+```bash
+cilium status
+    /¯¯\
+ /¯¯\__/¯¯\    Cilium:             OK
+ \__/¯¯\__/    Operator:           OK
+ /¯¯\__/¯¯\    Envoy DaemonSet:    OK
+ \__/¯¯\__/    Hubble Relay:       disabled
+    \__/       ClusterMesh:        OK
+```
+
+### Using Global Services
+
+Load-balancing between clusters is achieved by defining a Kubernetes service with identical name and namespace in each cluster and adding the annotation `service.cilium.io/global: "true"`
+
+Deploy sample service to both cluster-01 and cluster-02
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/cilium/cilium/1.20.4/examples/kubernetes/clustermesh/cluster1.yaml
+kubectl apply -f https://raw.githubusercontent.com/cilium/cilium/1.20.4/examples/kubernetes/clustermesh/global-service-example.yaml
+```
+
+Try to access `rebel-base` service from either of the clusters, you will get responces from both cluster-01 and cluster-02
+
+```bash
+kubectl exec -ti deployment/x-wing -- curl rebel-base
+```
+
+By default, a Global Service will load-balance across backends in multiple clusters. if you want to prevent service backends from being shared to other clusters, Add `service.cilium.io/shared: "false"`
+
+If you set `service.cilium.io/shared: "false"` Annotation  to `rebel-base` service in cluster-01, If you try to access `rebel-base` service you get responce from both cluster-01 and cluster but when you access the same `rebel-base` service in cluster-02 you get response from cluster-02 only.
 
 #### Test Pod Connectivity Between Clusters
 
@@ -353,23 +395,39 @@ If validation does not succeed:
 
 For more detail, see the [Cluster Mesh Troubleshooting](https://docs.cilium.io/en/stable/operations/troubleshooting/#troubleshooting-clustermesh) guide.
 
-#### Test with a Global Service
+## Conclusion
 
-Deploy the same Service in both clusters with the `service.cilium.io/global` annotation:
+Connecting multiple Kubernetes clusters without introducing heavy API gateways, reverse proxies, or complex sidecar meshes has traditionally been one of the biggest challenges in cloud-native architecture.
 
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: echo
-  annotations:
-    service.cilium.io/global: "true"
-spec:
-  selector:
-    app: echo
-  ports:
-    - port: 80
-      targetPort: 8080
-```
+By combining **Cilium ClusterMesh** with **K3s**, we achieved a flat, high-performance L3/L4 network across independent clusters directly at the eBPF kernel level. Workloads can discover and communicate with each other securely using native Kubernetes DNS and identity-aware security policies—all without losing control plane isolation or sacrificing network throughput.
 
-Requests to `echo` from either cluster are now load-balanced across backends in both clusters. Add `service.cilium.io/affinity: "local"` to prefer local backends and only fail over to the remote cluster when local ones are unavailable.
+### What We Covered
+
+In this guide, we walked through the complete lifecycle of setting up multi-cluster networking:
+
+1. **Architecture & Prerequisites:**
+   * Compared ClusterMesh against Layer 7 gateways and sidecar-based service meshes (e.g., Istio).
+   * Identified core requirements: non-overlapping Pod/Service CIDRs, direct node IP reachability, and eBPF kernel support.
+2. **Bootstrapping K3s without Flannel:**
+   * Deployed K3s clusters with `--flannel-backend=none` and disabled `kube-proxy` to let Cilium take over the entire networking datapath.
+   * Assigned distinct cluster CIDRs (`10.42.0.0/16` vs `10.52.0.0/16`) to eliminate IP collision risks.
+3. **Deploying Cilium as CNI via HelmChart CRDs:**
+   * Configured eBPF-based routing, native packet forwarding, and Hubble observability.
+   * Allocated unique cluster IDs (`id: 1`, `id: 2`) and names for mesh identification.
+4. **Configuring Shared CA & Mutual TLS:**
+   * Synchronized the root `cilium-ca` between clusters to establish cryptographic trust between the Cilium agents and the `clustermesh-apiserver`.
+5. **Enabling ClusterMesh & Cross-Cluster Peering:**
+   * Exposed the `clustermesh-apiserver` via `NodePort` (32379) and established bidirectional peer connectivity.
+6. **Deploying & Testing Global Services:**
+   * Configured cross-cluster services using the `service.cilium.io/global: "true"` annotation for automatic multi-cluster load balancing and failover.
+   * Controlled backend isolation using `service.cilium.io/shared: "false"`.
+7. **Validation & Health Checks:**
+   * Verified mesh peering and ran end-to-end multi-cluster pod connectivity suites with the Cilium CLI.
+
+### Best Practices for Production
+
+* **Plan Your IPAM Upfront:** Always verify that Pod and Service CIDRs never overlap across current or future mesh member clusters.
+* **Firewall & Security Groups:** Ensure the NodePort (`32379`) used by `clustermesh-apiserver` and native routing ports are open across cluster network security groups.
+* **Leverage Hubble for Observability:** Use Hubble Relay and UI to visually inspect cross-cluster traffic and debug network policy drops in real-time.
+
+Happy Kubernetes-ing! 🚀
