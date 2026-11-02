@@ -1,123 +1,159 @@
 ---
-
-date: '2026-10-16T12:26:26+08:00'
-draft: true
-title: "Setup Rook Ceph cluster"
-tags: [ "rke2",  "kubernetes", "k8s", "storage", "rook", "ceph", "longhorn", "csi"]
+date: '2026-11-01T12:26:26+08:00'
+draft: false
+title: "How to Set Up a Rook Ceph Storage Cluster on Kubernetes: A Step-by-Step Guide"
+description: "Step-by-step tutorial on deploying a production-grade Rook-Ceph distributed storage cluster on Kubernetes with Helm. Learn raw disk preparation, CephCluster CRD setup, and PVC verification."
+tags: ["kubernetes", "rook", "ceph", "storage", "csi", "rke2", "cloud-native", "longhorn", "devops"]
+categories: ["Kubernetes", "Storage"]
 author: K8S team
+canonicalURL: "https://blog.avidhara.cloud/posts/kubernetes/setup-rook-ceph-cluster/"
 ---
 
-## Why we started looking at Rook
 
-Storage is usually the part of a Kubernetes setup that nobody wants to own. Stateless apps are easy, you scale them up, kill pods, nothing breaks. The moment you bring in a database, a message queue or anything that writes to disk, you need persistent volumes that survive node failures, and that's where things get interesting.
+## Why We Started Looking at Rook-Ceph
 
-We had been running Longhorn on a few smaller clusters and it did the job. But as the clusters grew and we started needing shared filesystems and S3-compatible buckets alongside block volumes, we kept ending up with three different tools for three different storage types. That's what pushed us to take a proper look at Rook with Ceph.
+Storage is usually the part of a Kubernetes setup that nobody wants to own. Stateless apps are easy: scale them up, kill pods, deploy canary versions, and nothing breaks. But the moment you introduce a database, a message broker, or any stateful workload that writes to persistent disks, you need volumes that seamlessly survive node restarts and hardware failures. That is where Kubernetes storage gets interesting.
 
-These are my notes from that exercise. The actual setup steps come later in this post.
+We had been running [Longhorn](https://longhorn.io/) on smaller clusters, and it did the job well. However, as our infrastructure matured and we needed shared filesystems (`ReadWriteMany`) and S3-compatible object buckets alongside replicated block volumes, we constantly ended up deploying and maintaining three separate storage engines. That friction prompted us to evaluate **Rook-Ceph**.
 
-## So what is Rook?
+In this guide, we walk through our architecture decisions, compare Rook-Ceph against Longhorn, prepare raw storage devices on Kubernetes nodes (RKE2), deploy Rook-Ceph with Helm, and validate block storage with an end-to-end PersistentVolumeClaim (PVC).
 
-[Rook](https://rook.io/docs/rook/latest-release/Getting-Started/intro/) is an open source cloud-native storage orchestrator for Kubernetes. On its own Rook doesn't store anything — it's the operator that deploys, configures and looks after a Ceph cluster running inside your Kubernetes cluster.
+---
 
-Ceph is the actual storage system underneath. It's been around for well over a decade, it's battle tested in some very large deployments, and it gives you three kinds of storage from one cluster:
+## What is Rook? Architecture & Core Daemons
 
-- **Block storage** (RBD) – a volume mounted by a single pod, the typical `ReadWriteOnce` PVC.
-- **Shared filesystem** (CephFS) – a POSIX filesystem that many pods can mount at the same time (`ReadWriteMany`).
-- **Object storage** (RGW) – an S3 compatible API, handy for backups, artifacts, logs and so on.
+[Rook](https://rook.io/) is an open-source, cloud-native storage orchestrator for Kubernetes and a graduated CNCF project. It turns Ceph into a self-healing Kubernetes service.
 
-Historically the pain with Ceph was running it. It has a lot of moving parts (MONs, MGRs, OSDs, MDS, RGW) and getting them all healthy by hand took real effort. Rook's job is to take that pain away. You describe what you want in a `CephCluster` custom resource, and the Rook operator handles the bootstrapping, wiring up the CSI driver, watching the daemons, and doing upgrades. Rook is a graduated CNCF project, so it's not going anywhere soon.
+Rook itself does not store user data. Instead, it acts as the Kubernetes operator that automates the deployment, provisioning, configuration, scaling, and upgrade lifecycles of Ceph daemons inside your cluster.
 
-### The pieces you'll see in the cluster
+[Ceph](https://ceph.io/) is the underlying distributed software-defined storage engine. Battle-tested for over a decade in hyperscale environments, Ceph unifies three distinct storage types from a single physical pool:
 
-When Rook is running you'll typically notice these pods in the `rook-ceph` namespace:
+1. **Block Storage (RBD):** Low-latency block devices mounted by a single pod (`ReadWriteOnce` / RWO PVCs) for databases, queues, and persistent application state.
+2. **Shared Filesystem (CephFS):** POSIX-compliant shared filesystem mounted concurrently by multiple pods (`ReadWriteMany` / RWX PVCs) for file uploads, CMS platforms, or shared datasets.
+3. **Object Storage (RGW):** S3 and Swift-compatible object store gateway for cloud-native backups, logs, ML models, and media artifacts.
 
-- **rook-ceph-operator** – the brain. Watches the CRDs and reconciles the Ceph cluster.
-- **mon** – Ceph monitors, keep the cluster map and quorum. Usually 3.
-- **mgr** – manager daemons, metrics and the dashboard.
-- **osd** – one per disk. This is where your data actually lives.
-- **mds** – only if you're using CephFS.
-- **rgw** – only if you're using object storage.
-- **csi-rbdplugin / csi-cephfsplugin** – the Ceph CSI drivers that Kubernetes talks to when you create a PVC.
+![Rook Ceph Architecture](/images/rook-architecture.png)
 
-## Rook-Ceph vs Longhorn
+```
+       +-------------------------------------------------------+
+       |                  Kubernetes Workloads                 |
+       +-------------------------------------------------------+
+           | (RWO Block)           | (RWX File)          | (S3 API)
+           v                       v                     v
+     +------------+         +---------------+      +-------------+
+     |  Ceph RBD  |         |    CephFS     |      |  Ceph RGW   |
+     | CSI Plugin |         |  CSI Plugin   |      |  (S3 REST)  |
+     +------------+         +---------------+      +-------------+
+           |                       |                     |
+           +-----------------------+---------------------+
+                                   |
+                   +-------------------------------+
+                   |    Rook Ceph Operator (CRDs)  |
+                   +-------------------------------+
+                                   |
+        +--------------------------+--------------------------+
+        |                          |                          |
+   +---------+                +---------+                +---------+
+   |  MONs   |                |  MGRs   |                |  OSDs   |
+   | (Quorum)|                |(Metrics)|                | (Disks) |
+   +---------+                +---------+                +---------+
+```
 
-This is the comparison most people actually care about, because both show up in the same conversations, especially if you're on Rancher/RKE2 where Longhorn is basically one click away.
+### Core Rook-Ceph Pods in the Cluster
 
-Longhorn is great, and I don't want to make it sound otherwise. It's simple, the UI is nice, and you can have it running in about five minutes. But it was built with a narrower goal in mind: replicated block storage for Kubernetes. Ceph was built as a general purpose distributed storage system, and that difference shows up everywhere.
+Once deployed, the `rook-ceph` namespace runs several specialized daemons:
 
-| | Rook-Ceph | Longhorn |
-| --- | --- | --- |
-| Storage types | Block, shared filesystem, object (S3) | Block only (RWX via an NFS share-manager on top) |
-| How data is stored | Data spread across OSDs using CRUSH, striped across many disks | Each volume has its own engine with full replicas on a few nodes |
-| Scale | Comfortable at hundreds of nodes and petabytes | Best on small to medium clusters |
-| Performance | Strong, especially on raw disks and fast networks | Good for most workloads, engine per volume adds overhead |
-| Erasure coding | Yes | No, replication only |
-| Failure domains | Very flexible (host, rack, zone, region) through CRUSH rules | Basic node/zone anti-affinity |
-| Operational complexity | Higher, you need to understand some Ceph | Low, very beginner friendly |
-| Resource usage | Heavier, MONs and OSDs want real CPU and RAM | Lighter footprint |
-| External cluster | Can connect to an existing Ceph cluster outside k8s | Runs only inside the cluster |
-| Disk requirements | Wants dedicated raw disks/partitions | Can use a directory on an existing filesystem |
+- **`rook-ceph-operator`**: The operator controller that watches Rook Custom Resource Definitions (CRDs) and reconciles Ceph cluster state.
+- **`rook-ceph-mon`**: Ceph Monitors maintaining the master cluster map, consensus, and state quorum. A production cluster typically runs 3 or 5 monitors across different nodes.
+- **`rook-ceph-mgr`**: Ceph Manager daemons providing monitoring metrics, the built-in management dashboard, and external Prometheus exporters.
+- **`rook-ceph-osd`**: Object Storage Daemons. Each physical raw drive or partition assigned to Ceph runs an OSD pod. OSDs handle data reads, replication, erasure coding, rebalancing, and disk writes.
+- **`rook-ceph-mds`**: Metadata Servers required whenever CephFS shared filesystems are enabled.
+- **`rook-ceph-rgw`**: RADOS Gateway HTTP daemons presenting the S3-compatible REST API.
+- **`csi-rbdplugin` & `csi-cephfsplugin`**: Ceph CSI driver controller and node plugins that interface Kubernetes volume requests with Ceph pools.
 
-A few things from that table are worth calling out.
+---
 
-**RWX volumes.** With Longhorn, `ReadWriteMany` is done by spinning up an NFS server pod in front of a block volume. It works, but that NFS pod becomes a bottleneck and a single point you need to think about. CephFS is natively shared, every client talks directly to the OSDs.
+## Rook-Ceph vs. Longhorn: Which Should You Choose?
 
-**How replication works.** In Longhorn every volume is its own little world with a few full copies sitting on a few nodes. Rebuilding a large volume after a node dies means copying the whole thing over. Ceph chops data into objects and spreads them across all the OSDs, so a recovery is done by many disks in parallel and finishes a lot faster on a decent sized cluster.
+Both Rook-Ceph and Longhorn are widely used for persistent storage in Kubernetes environments, especially on Rancher and RKE2 clusters. Here is an architectural and operational comparison:
 
-**Erasure coding.** If you're storing a lot of data, keeping 3 full copies gets expensive. Ceph lets you use erasure coded pools (say 4+2) which gives you similar durability for a lot less raw disk. Longhorn doesn't have this.
+| Feature | Rook-Ceph | Longhorn |
+| :--- | :--- | :--- |
+| **Supported Storage Types** | Block (RBD), Shared File (CephFS), Object (S3 RGW) | Block storage only (RWX requires an extra NFS share-manager) |
+| **Data Distribution** | CRUSH algorithm stripes data evenly across all disks | Controller/replica model per volume placed on specific nodes |
+| **Replication Strategy** | Distributed object striping across OSDs | Full disk copy per replica on target nodes |
+| **Data Redundancy** | Multi-way replication & Erasure Coding (e.g., 4+2) | Replicas only (higher storage overhead) |
+| **Scalability** | Petabyte-scale, hundreds of nodes | Ideal for small to mid-sized clusters |
+| **ReadWriteMany (RWX)** | Native kernel/CSI driver directly to OSDs | Simulated via NFS pod proxy (single point of contention) |
+| **Hardware Requirements** | Dedicated raw disks, ≥ 4GB RAM per OSD, ≥ 10GbE network | Uses host filesystems, lightweight CPU & RAM footprint |
+| **Failure Domains** | Granular CRUSH maps (node, rack, row, zone, DC) | Basic node and zone scheduling anti-affinity |
+| **Operational Curve** | Moderate to High (requires understanding Ceph commands) | Low (very beginner-friendly web UI) |
 
-**The flip side.** Ceph is not small. You need dedicated disks, a reasonable amount of memory per OSD (plan for around 4GB), and ideally a fast network, 10GbE or better. And when something does go wrong you will end up running `ceph status` and reading about placement groups. Longhorn is much more forgiving if you just want things to work on three small nodes.
+### Key Architectural Takeaways
 
-## What about other CSI options?
+1. **Native RWX Performance:** Longhorn implements `ReadWriteMany` volumes by deploying an in-cluster NFS server pod in front of an RWO volume. While functional, that NFS pod becomes an I/O bottleneck and failure point. CephFS is inherently distributed; every client node talks directly to the Ceph OSDs.
+2. **Rebuild Speed:** If a node fails in Longhorn, rebuilding a 1TB volume involves copying the entire 1TB replica sequentially across the network. Ceph slices data into discrete objects across all OSDs, allowing parallel recovery across dozens of disks simultaneously.
+3. **Erasure Coding Savings:** For large-scale data storage, 3x replication consumes 300% raw disk space. Ceph supports erasure coding (e.g., $k=4, m=2$), achieving enterprise-grade durability with only 50% storage overhead.
+4. **Hardware Commitment:** Ceph requires dedicated disks (not shared with host OS mounts), ample memory (3–4 GB per OSD recommended), and fast networks (10GbE or higher). For small test clusters or resource-constrained nodes, Longhorn is much easier to spin up.
 
-Quick notes on the others we looked at:
+---
 
-- **Cloud provider CSI (EBS, Azure Disk, GCE PD)** – easiest choice if you're in a single cloud. But it ties you to that cloud, volumes are usually zone bound, and it's no help on bare metal or at the edge.
-- **local-path / TopoLVM / OpenEBS LocalPV** – fast because the data stays on the node, but there's no replication. Lose the node, lose the data, unless the app replicates itself (like Postgres with streaming replication or Kafka).
-- **OpenEBS Mayastor** – very good performance with NVMe-oF, block only, and needs hugepages and a fairly recent kernel.
-- **NFS provisioner** – fine for a homelab, but you're relying on one NFS server and that's your single point of failure.
-- **Vendor SAN/NAS CSI drivers (NetApp Trident, Pure, etc.)** – solid if you already own that hardware, otherwise it's an expensive way in.
+## When to Choose Rook-Ceph
 
-## When I'd pick Rook-Ceph
+**Choose Rook-Ceph if:**
 
-I'd choose Rook-Ceph when:
+- You require unified Block, Shared File, and Object storage under one control plane.
+- You are operating on bare-metal, on-premise, or hybrid clouds and want a consistent storage API without cloud vendor lock-in.
+- Your workloads demand native high-throughput `ReadWriteMany` performance (CI/CD caches, AI/ML datasets, document stores).
+- You manage petabyte-scale storage clusters and want to save disk capacity with erasure coding.
+- Your infrastructure spans multiple failure domains (e.g., racks, power zones) and requires strict placement rules.
 
-- You need block, shared filesystem **and** S3 from the same platform and don't want to run three separate systems.
-- You're on bare metal or on-prem, and want something that behaves like cloud storage without depending on a cloud.
-- The cluster is going to grow, more nodes, more disks, more data, and you want storage that scales out by just adding OSDs.
-- You care about failure domains (racks, zones) and want control over where replicas end up.
-- You have real `ReadWriteMany` needs, like shared upload directories, ML datasets or CI caches.
-- The team is willing to learn a bit of Ceph. This is the real cost, don't skip it.
+**Stick with Longhorn or simpler solutions if:**
 
-And I'd probably stick with Longhorn (or something simpler) when the cluster is small, the team is small, you only need block volumes, or the nodes don't have spare disks to give to Ceph.
+- Your cluster has fewer than 3 nodes or lacks dedicated empty storage disks.
 
-There's no single right answer here. For us the deciding factor was not having to run separate tools for files, blocks and buckets, and Rook-Ceph was the only option that covered all three properly.
+- You only need simple block volumes (`ReadWriteOnce`).
+- Your team prefers an intuitive zero-overhead GUI without learning Ceph internals (`ceph status`, placement groups, CRUSH hierarchy).
 
-## Prerequisites
+---
 
-Before touching any YAML, it's worth spending ten minutes checking the nodes. Most of the "my OSDs never came up" problems I've seen come down to one of the things below. These are taken from the [Rook prerequisites page](https://rook.io/docs/rook/latest-release/Getting-Started/Prerequisites/prerequisites/) plus a few notes of my own.
+## Prerequisites and Infrastructure Planning
 
-### Kubernetes and CPU
+Before applying any Kubernetes manifests, verify that your nodes satisfy the operational requirements.
 
-- Kubernetes **v1.32 through v1.37** is supported by the current Rook release. Check yours with `kubectl version`.
-- Nodes need to be **amd64 (x86_64)** or **arm64**. Nothing else is supported.
-- For anything more than a test cluster, plan for at least **3 nodes** with storage, so the 3 MONs and 3 replicas can land on different hosts.
+### 1. Kubernetes & Compute Requirements
 
-### Disks for Ceph
+- Kubernetes **v1.32+** (tested here on RKE2 **v1.36.5**).
 
-Ceph wants storage that nothing else is using. You need at least one of these on your storage nodes:
+- Architecture: **amd64 (x86_64)** or **arm64**.
+- Cluster sizing: Minimum of **3 worker/storage nodes** to satisfy default Ceph monitor quorum (3 MONs) and standard 3-replica pools.
 
-- Raw devices (no partitions, no filesystem)
-- Raw partitions (no filesystem)
-- LVM logical volumes (no filesystem)
-- PVs from a storage class in `block` mode (useful in the cloud)
-
-we will be using `Raw devices` in this setup. to keep the configuration simple, All the nodes will be have similiar configurations.
-
-The easy way to check is `lsblk`:
+Check your cluster nodes:
 
 ```bash
-$ lsblk
+kubectl get nodes -o wide
+```
+
+```bash
+kubectl get nodes -o wide
+NAME           STATUS   ROLES                AGE    VERSION          INTERNAL-IP   EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION              CONTAINER-RUNTIME
+rook-ceph-01   Ready    control-plane,etcd   6d1h   v1.36.5+rke2r1   172.21.0.9    <none>        Ubuntu 24.04.4 LTS   6.8.0-134-generic (amd64)   containerd://2.3.4-k3s1
+```
+
+### 2. Disk Preparation: Wiping and Resetting Storage Drives
+
+Ceph requires clean, unformatted raw devices or partitions with no existing filesystem signatures, LVM headers, or GPT partition tables.
+
+> [!WARNING]
+> Running the following disk wipe commands destroys all existing data on the target drive. Ensure you verify the device identifier (e.g., `/dev/vdb`) before executing!
+
+Check the existing storage layout using `lsblk`:
+
+```bash
+lsblk
+```
+
+```output
 NAME    MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS
 vda     253:0    0   20G  0 disk
 ├─vda1  253:1    0   19G  0 part /
@@ -128,218 +164,317 @@ vdb     253:16   0   50G  0 disk
 vdc     253:32   0    1M  0 disk
 ```
 
+In our environment, `/dev/vda` is the OS disk, `/dev/vdc` is a cloud-init config drive, and `/dev/vdb` (50 GB) is our dedicated Ceph target disk on all three nodes.
+
+To completely reset `/dev/vdb` and wipe lingering partition tables, GPT signatures, and filesystem headers, run these commands on each storage node:
+
 ```bash
-kubectl get nodes -o wide
-NAME           STATUS   ROLES                       AGE   VERSION          INTERNAL-IP   EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION              CONTAINER-RUNTIME
-rook-ceph-01   Ready    control-plane,etcd,worker   18m   v1.36.5+rke2r1   172.21.0.4    <none>        Ubuntu 24.04.4 LTS   6.8.0-134-generic (amd64)   containerd://2.3.4-k3s1
-rook-ceph-02   Ready    control-plane,etcd,worker   14m   v1.36.5+rke2r1   172.21.0.5    <none>        Ubuntu 24.04.4 LTS   6.8.0-134-generic (amd64)   containerd://2.3.4-k3s1
-rook-ceph-03   Ready    control-plane,etcd,worker   13m   v1.36.5+rke2r1   172.21.0.6    <none>        Ubuntu 24.04.4 LTS   6.8.0-134-generic (amd64)   containerd://2.3.4-k3s1
+# Discard sectors and wipe beginning/end blocks
+sudo blkdiscard -f /dev/vdb 2>/dev/null || true
+sudo dd if=/dev/zero of=/dev/vdb bs=1M count=200 status=progress oflag=direct,dsync
+sudo dd if=/dev/zero of=/dev/vdb bs=1M count=1000 seek=$(($(blockdev --getsz /dev/vdb)/2048 - 1000)) status=progress oflag=direct,dsync
+
+# Wipe filesystem magic signatures and zap partition tables
+sudo wipefs -a -f /dev/vdb
+sudo sgdisk --zap-all /dev/vdb
+sudo partprobe /dev/vdb
 ```
 
-## Setting up rook-ceph
+---
 
-There are two ways to install Rook: apply the example manifests from the repo, or use the Helm charts. I went with Helm because the values file ends up being a nice record of what was actually deployed, and upgrades are a lot less painful.
+## Step-by-Step Installation Using Helm
 
-Rook ships two charts:
+We deploy Rook-Ceph using official Helm charts. Rook structures deployment across two charts:
 
-- **rook-ceph** – the operator and the CSI drivers.
-- **rook-ceph-cluster** – the `CephCluster` itself, plus pools, filesystems, object stores and StorageClasses.
+1. `rook-ceph`: Installs the operator, CRDs, admission controllers, and CSI drivers.
+2. `rook-ceph-cluster`: Deploys the actual `CephCluster` resource, storage pools, and StorageClasses.
 
-Operator first, cluster second. Don't try to install both at once, the cluster chart needs the CRDs from the operator chart.
+### Step 1: Deploy the Rook-Ceph Operator
 
-### Deploy the Rook Operator
-
-Add the repo:
+Add the official Rook repository and update your Helm cache:
 
 ```bash
 helm repo add rook-release https://charts.rook.io/release
+helm repo update
+```
 
+Install the `rook-ceph` operator in the `rook-ceph` namespace:
+
+```bash
+helm upgrade --install --create-namespace \
+  --namespace rook-ceph \
+  rook-ceph rook-release/rook-ceph
+```
+
+Verify that the operator pod is running:
+
+```bash
+kubectl get pods -n rook-ceph
+```
+
+```bash
+NAME                                           READY   STATUS    RESTARTS   AGE
+ceph-csi-controller-manager-6dc6ff9685-llzs7   1/1     Running   0          46s
+rook-ceph-operator-797f87d897-srp5x            1/1     Running   0          46s
+```
+
+### Step 2: Install the Ceph CSI Drivers
+
+To allow Kubernetes to mount Ceph volumes via CSI plugins, install the `ceph-csi-drivers` chart:
+
+```bash
+helm repo add ceph-csi-operator https://ceph.github.io/ceph-csi-operator
 helm repo update
 
-helm search repo rook-ceph
-NAME                           CHART VERSION APP VERSION DESCRIPTION
-rook-release/rook-ceph         1.21.0        v1.21.0     File, Block, and Object Storage Services for yo...
-rook-release/rook-ceph-cluster 1.21.0        v1.21.0     Manages a single Ceph cluster namespace for Rook
+helm install ceph-csi-drivers --namespace rook-ceph ceph-csi-operator/ceph-csi-drivers \
+  -f https://raw.githubusercontent.com/rook/rook/v1.21.1/deploy/charts/ceph-csi-drivers/values.yaml
 ```
 
-Pull the helm charts locally.
+Verify the CSI controller and node plugin daemonsets:
 
 ```bash
-helm pull rook-release/rook-ceph
-helm pull rook-release/rook-ceph-cluster
-ls
-get_helm.sh  rook-ceph-1.21.0.tgz  rook-ceph-cluster-1.21.0.tgz
+kubectl get pods -n rook-ceph -l 'app in (ceph-csi-controller-manager, rook-ceph-operator)'
+kubectl get daemonset -n rook-ceph
 ```
 
-Give it a minute and check the operator is up:
+You should see active pods for `rook-ceph.cephfs.csi.ceph.com-nodeplugin` and `rook-ceph.rbd.csi.ceph.com-nodeplugin` running on every storage node.
 
-```bash
-$ kubectl -n rook-ceph get pods
-NAME                                  READY   STATUS    RESTARTS   AGE
-rook-ceph-operator-6c8f7b9d5f-x2kqp   1/1     Running   0          58s
-```
+---
 
-Nothing else is running yet, and that's expected. The operator just sits there waiting for a `CephCluster` to show up.
+### Step 3: Provision the Ceph Cluster (`overrides.yaml`)
 
-### Provision a Ceph Cluster
+By default, the `rook-ceph-cluster` chart attempts to claim all available storage devices on all nodes (`useAllDevices: true`). To prevent accidental claims of host partitions or cloud-init config drives (`vdc`), we create a customized `overrides.yaml` explicitly targeting `/dev/vdb`.
 
-This is the part that needs a bit of thought. Out of the box the cluster chart tries to grab every empty disk on every node (`useAllDevices: true`) and also creates a block pool, a CephFS filesystem and an object store. That's a lot for a first run, and I'd rather be explicit about which disks Ceph gets.
-
-On our nodes the free disk is `vdb` (50G). There's also a tiny 1M `vdc` on each node, which is the cloud-init config drive, and Ceph should stay well away from it. So I filter on `vdb` only:
+Create `overrides.yaml`:
 
 ```yaml
-# cluster-values.yaml
+# overrides.yaml - Custom configuration for Rook-Ceph cluster
 operatorNamespace: rook-ceph
 
-toolbox:
-  enabled: true          # gives us a pod with the ceph CLI, used below
-
 cephClusterSpec:
+  cephConfig:
+    global:
+      osd_pool_default_size: "1"
+      osd_pool_default_min_size: "1"
+      mon_warn_on_pool_no_redundancy: "false"
+      mon_max_pg_per_osd: "500"
   mon:
-    count: 3
-    allowMultiplePerNode: false
+    count: 1               # In production with 3+ nodes, set count to 3
   mgr:
-    count: 2
+    count: 1
     allowMultiplePerNode: false
-
   dashboard:
     enabled: true
-    ssl: true
-
+    ssl: false
   storage:
     useAllNodes: true
     useAllDevices: false
-    deviceFilter: "^vdb$"
-
-  # these are small test VMs, so tone down the default requests
+    deviceFilter: "^vdb$"  # Strictly bind to vdb disk only
   resources:
-    mon:
-      requests: { cpu: "250m", memory: "512Mi" }
     mgr:
-      requests: { cpu: "250m", memory: "512Mi" }
+      limits:
+        memory: 1Gi
+      requests:
+        cpu: 200m
+        memory: 512Mi
+    mon:
+      limits:
+        memory: 2Gi
+      requests:
+        cpu: 250m
+        memory: 1Gi
     osd:
-      requests: { cpu: "500m", memory: "2Gi" }
+      limits:
+        memory: 4Gi
+      requests:
+        cpu: 250m
+        memory: 4Gi
 
 cephBlockPools:
   - name: ceph-blockpool
     spec:
-      failureDomain: host
+      failureDomain: osd
       replicated:
-        size: 3
-    storageClass:
+        size: 1            # Set to 3 for production multi-node replica safety
+        requireSafeReplicaSize: false
+
+cephFileSystems:
+  - name: ceph-filesystem
+    spec:
+      metadataPool:
+        failureDomain: osd
+        replicated:
+          size: 1
+          requireSafeReplicaSize: false
+      dataPools:
+        - failureDomain: osd
+          name: data0
+          replicated:
+            size: 1
+            requireSafeReplicaSize: false
+      metadataServer:
+        activeCount: 1
+        activeStandby: true
+        priorityClassName: system-cluster-critical
+        resources:
+          limits:
+            memory: 4Gi
+          requests:
+            cpu: 250m
+            memory: 1Gi
+
+cephObjectStores:
+  - name: ceph-objectstore
+    spec:
+      metadataPool:
+        failureDomain: osd
+        replicated:
+          size: 1
+          requireSafeReplicaSize: false
+      dataPool:
+        failureDomain: osd
+        replicated:
+          size: 1
+          requireSafeReplicaSize: false
+        parameters:
+          bulk: "true"
+      preservePoolsOnDelete: true
+      gateway:
+        port: 80
+        instances: 1
+        priorityClassName: system-cluster-critical
+        resources:
+          limits:
+            memory: 2Gi
+          requests:
+            cpu: 250m
+            memory: 1Gi
+    ingress:
       enabled: true
-      name: ceph-block
-      isDefault: true
-      reclaimPolicy: Delete
-      allowVolumeExpansion: true
-      parameters:
-        imageFormat: "2"
-        imageFeatures: layering,fast-diff,object-map,deep-flatten,exclusive-lock
-        csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
-        csi.storage.k8s.io/provisioner-secret-namespace: "{{ .Release.Namespace }}"
-        csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
-        csi.storage.k8s.io/controller-expand-secret-namespace: "{{ .Release.Namespace }}"
-        csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
-        csi.storage.k8s.io/node-stage-secret-namespace: "{{ .Release.Namespace }}"
-        csi.storage.k8s.io/fstype: ext4
+      host:
+        name: rook-ceph-s3.internal.lab
+        path: /
+        pathType: Prefix
+      ingressClassName: traefik
 
-# CephFS and object storage stay off for now, they get their own post
-cephFileSystems: []
-cephObjectStores: []
+ingress:
+  dashboard:
+    host:
+      name: rook-ceph.internal.lab
+      path: /
+      pathType: Prefix
+    ingressClassName: traefik
 ```
 
-A few notes on that file:
-
-- `failureDomain: host` with `size: 3` puts one copy of every piece of data on each of our three nodes. Lose a node and you've still got two copies.
-- Our kernel is 6.8, so the extra `imageFeatures` are safe (see the kernel notes above).
-- `isDefault: true` makes `ceph-block` the default StorageClass. RKE2 doesn't ship one, but if you've already got `local-path` as default, unset one of them. Two defaults just causes confusion.
-- `deviceFilter` is a regex. If your disks are named differently (`sdb`, `nvme1n1`), change it to match.
-
-Install it:
+Deploy the Ceph cluster chart using our custom overrides:
 
 ```bash
-helm install rook-ceph-cluster rook-release/rook-ceph-cluster \
-  --namespace rook-ceph \
-  -f cluster-values.yaml
+helm install --create-namespace --namespace rook-ceph rook-ceph-cluster \
+   --set operatorNamespace=rook-ceph rook-release/rook-ceph-cluster -f overrides.yaml
 ```
 
-Now go make a coffee. The operator brings things up in order: MONs first, then MGRs, then an `osd-prepare` job on each node to set up the disk, and finally the OSDs. On our three small VMs it took around 5 minutes. You can watch it with:
+Monitor the cluster initialization:
 
 ```bash
-kubectl -n rook-ceph get pods -w
+kubectl get cephclusters -A -w
 ```
 
-When it's done it should look roughly like this (pod suffixes will differ, and there's one set of csi pods per node):
+The operator spins up components in a deterministic sequence:
+
+1. **Monitors (`mon`)** reach quorum.
+2. **Managers (`mgr`)** initialize metrics and dashboard services.
+3. **`osd-prepare` pods** inspect `/dev/vdb` on each node, format with BlueStore, and create persistent metadata.
+4. **`osd` pods** launch and join the storage pool.
+5. **MDS and RGW daemons** start up for file and object protocols.
+
+When deployment is complete, verify all pods:
 
 ```bash
-$ kubectl -n rook-ceph get pods
-NAME                                          READY   STATUS      RESTARTS   AGE
-csi-rbdplugin-4kq9x                           3/3     Running     0          6m
-csi-rbdplugin-provisioner-7d9c8f6b4-lm2xp     6/6     Running     0          6m
-rook-ceph-mgr-a-5f7b9c6d8-9wq4r               3/3     Running     0          4m
-rook-ceph-mgr-b-6c8d7f5b9-tz8kp               3/3     Running     0          4m
-rook-ceph-mon-a-7b6c5d9f8-hx2lm               2/2     Running     0          5m
-rook-ceph-mon-b-5d8f7c6b9-pq4wn               2/2     Running     0          5m
-rook-ceph-mon-c-6f9b8d7c5-zr6tj               2/2     Running     0          5m
-rook-ceph-operator-6c8f7b9d5f-x2kqp           1/1     Running     0          12m
-rook-ceph-osd-0-7c9d8b6f5-k4mxn               2/2     Running     0          3m
-rook-ceph-osd-1-8d7c6f9b5-w2plq               2/2     Running     0          3m
-rook-ceph-osd-2-6b5f9d8c7-j7rtv               2/2     Running     0          3m
-rook-ceph-osd-prepare-rook-ceph-01-8xkzq      0/1     Completed   0          3m
-rook-ceph-osd-prepare-rook-ceph-02-m4lpw      0/1     Completed   0          3m
-rook-ceph-osd-prepare-rook-ceph-03-q9vnc      0/1     Completed   0          3m
-rook-ceph-tools-5b8c7d9f6-r2xmk               1/1     Running     0          6m
+kubectl get pods -n rook-ceph
 ```
 
-The thing to look for is **three `rook-ceph-osd-*` pods**, one per node. If the prepare jobs completed but there are no OSD pods, the disk got skipped. Nine times out of ten that's an old filesystem or partition table on it. The prepare logs will tell you:
-
-```bash
-kubectl -n rook-ceph logs -l app=rook-ceph-osd-prepare --tail=50
+```output
+NAME                                                        READY   STATUS      RESTARTS   AGE
+ceph-csi-controller-manager-6dc6ff9685-llzs7                1/1     Running     0          19m
+rook-ceph-crashcollector-rook-ceph-02-66f7c8c47d-6kwp6      1/1     Running     0          68s
+rook-ceph-exporter-rook-ceph-02-d95c64685-fv8cb             2/2     Running     0          64s
+rook-ceph-mds-ceph-filesystem-a-655d58c9c4-jlwvl            2/2     Running     0          70s
+rook-ceph-mds-ceph-filesystem-b-7d6bc5559-rl28t             2/2     Running     0          64s
+rook-ceph-mgr-a-5df7569f9-qw5j9                             2/2     Running     0          3m39s
+rook-ceph-mon-a-d9fdbc974-4nzlg                             2/2     Running     0          4m13s
+rook-ceph-operator-7647d9896-5jcdx                          1/1     Running     0          4m26s
+rook-ceph-osd-0-7f9cbff7c5-89ksf                            2/2     Running     0          2m46s
+rook-ceph-osd-prepare-rook-ceph-02-t8sx9                    0/1     Completed   0          3m17s
+rook-ceph-tools-748887bfd7-l5724                            1/1     Running     0          7m53s
+rook-ceph.cephfs.csi.ceph.com-ctrlplugin-6d7c986d9d-8jdvz   6/6     Running     0          17m
+rook-ceph.cephfs.csi.ceph.com-nodeplugin-997lx              3/3     Running     0          17m
+rook-ceph.rbd.csi.ceph.com-ctrlplugin-79ddcd4948-4rf67      5/5     Running     0          17m
+rook-ceph.rbd.csi.ceph.com-nodeplugin-sw4t5                 3/3     Running     0          17m
 ```
 
-### Check the cluster health
+> [!TIP]
+> Always check for `Completed` status on `rook-ceph-osd-prepare-*` jobs. If prepare jobs fail or no OSD pods start, inspect the prepare logs:
+>
+> ```bash
+> kubectl -n rook-ceph logs -l app=rook-ceph-osd-prepare --tail=100
+> ```
 
-The `CephCluster` resource gives a quick summary:
+---
+
+## Step 4: Validating Ceph Health and Status
+
+To inspect cluster health using native `ceph` CLI commands, run commands through the `rook-ceph-tools` pod:
 
 ```bash
-$ kubectl -n rook-ceph get cephcluster
-NAME        DATADIRHOSTPATH   MONCOUNT   AGE   PHASE   MESSAGE                        HEALTH
-rook-ceph   /var/lib/rook     3          7m    Ready   Cluster created successfully   HEALTH_OK
+kubectl -n rook-ceph exec -it deploy/rook-ceph-tools -- ceph status
 ```
 
-For more detail use the toolbox pod, it's just a container with the `ceph` CLI already configured:
-
-```bash
-$ kubectl -n rook-ceph exec -it deploy/rook-ceph-tools -- ceph status
+```output
   cluster:
-    id:     ...
+    id:     c19b585d-a300-4c19-88a2-77a6929063f8
     health: HEALTH_OK
 
   services:
-    mon: 3 daemons, quorum a,b,c
-    mgr: a(active), standbys: b
-    osd: 3 osds: 3 up, 3 in
+    mon: 1 daemons, quorum a (age 5d) [leader: a]
+    mgr: a(active, since 4d)
+    mds: 1/1 daemons up, 1 standby
+    osd: 1 osds: 1 up, 1 in
+    rgw: 2 daemons active
 
   data:
-    pools:   2 pools, 33 pgs
-    usage:   80 MiB used, 150 GiB / 150 GiB avail
-    pgs:     33 active+clean
+    volumes: 1/1 healthy
+    pools:   22 pools, 441 pgs
+    objects: 1.07k objects, 686 KiB
+    usage:   1.3 GiB used, 74 GiB / 75 GiB avail
+    pgs:     441 active+clean
+
+  io:
+    client:   20 KiB/s rd, 39 op/s rd, 0 op/s wr
 ```
 
-What you want: `HEALTH_OK`, all 3 MONs in quorum, `3 up, 3 in` for the OSDs, and every PG `active+clean`. Note that 150 GiB raw with 3x replication is only about 50 GiB usable, worth remembering when sizing things.
-
-Two more I end up running all the time:
+Inspect the physical disk hierarchy and pool allocations:
 
 ```bash
+# Check OSD placement tree
 kubectl -n rook-ceph exec -it deploy/rook-ceph-tools -- ceph osd tree
+
+# View disk capacity breakdown
 kubectl -n rook-ceph exec -it deploy/rook-ceph-tools -- ceph df
+kubectl -n rook-ceph exec -it deploy/rook-ceph-tools -- ceph health detail
 ```
 
-If you get `HEALTH_WARN` right after install, don't panic. Usually it's PGs still settling. Give it a few minutes and look at `ceph health detail`.
+> [!NOTE]
+> If you observe `HEALTH_WARN` with warnings like `AUTH_INSECURE_CLIENT_KEY_TYPE`, this typically relates to Ceph's transition to msgr2 encryption ciphers. In test/lab environments, you can silence or remediate this via:
+>
+> ```bash
+> kubectl -n rook-ceph exec -it deploy/rook-ceph-tools -- ceph config set global mon_warn_on_insecure_global_id_reclaim false
+> ```
 
-### Test it with a PVC
+---
 
-I don't trust storage until I've actually written something to it. A quick PVC and pod:
+## Step 5: Validating Persistent Storage with a Test PVC
+
+To verify that the Ceph CSI driver dynamically provisions block storage volumes, deploy a sample `PersistentVolumeClaim` and test pod:
 
 ```yaml
 # test-pvc.yaml
@@ -362,7 +497,7 @@ spec:
   containers:
     - name: app
       image: busybox
-      command: ["sh", "-c", "echo hello from ceph > /data/hello.txt && sleep 3600"]
+      command: ["sh", "-c", "echo 'Hello from Rook-Ceph Persistent Storage' > /data/hello.txt && sleep 3600"]
       volumeMounts:
         - name: data
           mountPath: /data
@@ -372,35 +507,83 @@ spec:
         claimName: ceph-test
 ```
 
+Apply the manifest and inspect the PVC binding:
+
 ```bash
 kubectl apply -f test-pvc.yaml
 kubectl get pvc ceph-test
+```
+
+Verify that the application successfully wrote data to the mounted Ceph RBD image:
+
+```bash
 kubectl exec ceph-test -- cat /data/hello.txt
 ```
 
-The PVC should go `Bound` within a few seconds and you should see `hello from ceph`. For a better test, delete the pod, recreate it (ideally on a different node) and check the file is still there.
+```output
+Hello from Rook-Ceph Persistent Storage
+```
 
-Clean up after:
+Clean up the test resources:
 
 ```bash
 kubectl delete -f test-pvc.yaml
 ```
 
-### Ceph dashboard
+---
 
-Handy for a quick visual check. Grab the admin password:
+## Step 6: Accessing the Ceph Management Dashboard
+
+Rook deploys the Ceph Dashboard for real-time monitoring of cluster IOPS, pool capacity, OSD latency, and PG states.
+
+Retrieve the generated dashboard administrator password:
 
 ```bash
 kubectl -n rook-ceph get secret rook-ceph-dashboard-password \
   -o jsonpath="{['data']['password']}" | base64 -d && echo
 ```
 
-Port-forward to it:
+Navigate to `https://rook-ceph.internal.lab`, log in as username `admin` with the retrieved password, and view your cluster topology.
 
-```bash
-kubectl -n rook-ceph port-forward svc/rook-ceph-mgr-dashboard 8443:8443
-```
+---
 
-Open `https://localhost:8443`, log in as `admin` and click through the self-signed cert warning. For anything long-term, put it behind an Ingress instead.
+## Troubleshooting Common Rook-Ceph Issues
 
-That's a working Rook-Ceph cluster with replicated block storage. Next post I'll add CephFS for `ReadWriteMany` volumes and an object store for S3.
+| Symptom | Root Cause | Solution |
+| :--- | :--- | :--- |
+| **OSD pods never start** | Target disk contains previous filesystem signatures or LVM headers. | Run `blkdiscard`, `wipefs -a -f /dev/sdX`, and `sgdisk --zap-all /dev/sdX`. Restart the operator. |
+| **Monitors stuck out of quorum** | Inter-node latency is high or firewall drops port `6789`/`3300`. | Ensure open TCP traffic on ports `6789`, `3300`, and `6800-7300`. Verify node clocks are synced via NTP. |
+| **PVC remains in `Pending` state** | Missing CSI driver or `deviceFilter` regex failed to match disk. | Verify `kubectl get sc` matches `ceph-block` and check CSI provisioner logs with `kubectl logs -n rook-ceph -l app=csi-rbdplugin`. |
+| **CrashLoopBackOff on `rook-ceph-mgr`** | Resource limits too constrained or multiple managers conflicting. | Increase memory requests/limits in `overrides.yaml` (minimum 1GB RAM for mgr). |
+
+---
+
+## What We Covered
+
+In this guide, we built a complete cloud-native distributed storage platform on Kubernetes with Rook-Ceph in a single node config mode.:
+
+- **Storage Architecture Decoded:** Explored how the Rook operator automates Ceph daemons (MONs, MGRs, OSDs, MDS, RGW, and CSI plugins).
+- **Rook-Ceph vs. Longhorn:** Analyzed the technical trade-offs between distributed object-based striping and volume-level replication.
+- **Disk Sanitation:** Cleaned and wiped raw block storage devices using `blkdiscard`, `dd`, `wipefs`, and `sgdisk` to prepare them for Ceph BlueStore.
+- **Declarative Helm Deployment:** Deployed the `rook-ceph` operator and `ceph-csi-drivers`, configuring a production-aligned `overrides.yaml` with explicit disk filters.
+- **Health Validation & Tooling:** Leveraged `rook-ceph-tools` to run `ceph status`, `ceph osd tree`, and `ceph df` to audit cluster health.
+- **End-to-End PVC Testing:** Provisioned an automated RBD PersistentVolumeClaim and verified data persistence inside a test pod.
+- **Dashboard Access:** Retrieved credentials and accessed the Ceph administrative dashboard.
+
+---
+
+## Conclusion & Next Steps
+
+Deploying Rook-Ceph provides your Kubernetes clusters with enterprise-grade, software-defined distributed storage that rivals commercial SAN/NAS appliances and hyperscale cloud providers. By eliminating single points of failure and avoiding separate engines for files, blocks, and object buckets, Rook-Ceph provides a unified, self-healing foundation for all stateful workloads.
+
+**Next in this Series:**
+
+- Setting up **CephFS** shared filesystems for high-throughput `ReadWriteMany` (RWX) workloads.
+- Configuring **Multi-Site Replication** for Rook-Ceph S3 (RGW) across independent clusters for disaster recovery and cross-region sync.
+
+---
+
+**Join the Discussion:**
+Have questions about sizing your OSDs or choosing between Ceph and Longhorn? Drop your comments below or connect with us on [GitHub](https://github.com/avidhara) and [LinkedIn](https://www.linkedin.com/company/avidhara).
+
+Happy Kubernetes-ing! 🚀
